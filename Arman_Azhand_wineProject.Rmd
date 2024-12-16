@@ -1,0 +1,627 @@
+---
+title: "DS6306 - DDS: Project 1"
+author: "Arman Azhand"
+date: "2024-12-01"
+output: html_document
+---
+
+# Initializing our environment and loading in data
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(readxl)
+library(class)
+library(caret)
+library(olsrr)
+library(e1071)
+library(reshape2)
+library(GGally)
+library(bslib)
+library(ggthemes)
+```
+
+# read in data
+```{r dataImport}
+trainraw = read.csv(file.choose(), header = TRUE)
+testraw = read.csv(file.choose(), header = TRUE)
+winelocations = read_excel(file.choose())
+```
+
+# add locations and types by joining on ID
+```{r}
+train = left_join(trainraw, winelocations, by = "ID")
+test = left_join(testraw, winelocations, by = "ID")
+```
+
+# sanity check and summary data
+```{r}
+summary(train)
+summary(test)
+```
+# data cleaning/wrangling
+```{r}
+# make character variables same case
+train$type = tools::toTitleCase(train$type)
+test$type = tools::toTitleCase(test$type)
+train$location = tools::toTitleCase(train$location)
+test$location = tools::toTitleCase(test$location)
+
+# fix misinput data
+train$location = gsub("Califormia", "California", train$location)
+test$location = gsub("Califormia", "California", test$location)
+
+# change character variables to factors
+train$type = as.factor(train$type)
+test$type = as.factor(test$type)
+train$location = as.factor(train$location)
+test$location = as.factor(test$location)
+```
+
+# sanity check part 2
+```{r}
+summary(train)
+summary(test)
+```
+# visualize data
+# quality vs factors
+```{r}
+train %>% ggplot(aes(x = location, y = quality)) +
+  geom_boxplot()
+
+train %>% ggplot(aes(x = type, y = quality)) +
+  geom_boxplot()
+```
+
+# histogram of continous variables
+```{r}
+trainplot = train %>% select(-c(ID, type, location))
+
+for (i in 1:(ncol(trainplot) - 3)) {
+  p <- ggplot(trainplot, aes(x = trainplot[,i])) +
+    geom_histogram(bins = 20) +
+    labs(title = paste("Histogram of", names(trainplot)[i]), x = names(trainplot)[i])
+
+  print(p)
+}
+```
+
+# Imputing for NA Wine Type
+# tune for hyperparameter k
+```{r}
+combinedWine = rbind(select(train,-quality), test)
+
+set.seed(123)
+
+combinedWineNoNA = combinedWine %>% filter(!is.na(type))
+
+train_indices = sample(1:nrow(combinedWineNoNA), 0.7 * nrow(combinedWineNoNA))
+imputeTrain = combinedWineNoNA[train_indices,]
+imputeTest = combinedWineNoNA[-train_indices,]
+
+iterations = 300
+numks = 20
+
+masterAcc = matrix(nrow = iterations, ncol = numks)
+
+for (j in 1:iterations) {
+  accs = data.frame(accuracy = numeric(numks), k = numeric(numks))
+  train_indices = sample(1:nrow(combinedWineNoNA), 0.7 * nrow(combinedWineNoNA))
+  imputeTrain = combinedWineNoNA[train_indices,]
+  imputeTest = combinedWineNoNA[-train_indices,]
+  for (i in 1:numks) {
+    classifications = knn(imputeTrain[,2:12], imputeTest[,2:12], imputeTrain$type, prob = TRUE, k = i)
+    table(classifications, imputeTest$type)
+    cM = confusionMatrix(table(classifications, imputeTest$type))
+    masterAcc[j,i] = cM$overall[1]
+  }
+}
+
+meanAcc = colMeans(masterAcc)
+
+plot(seq(1, numks,1), meanAcc, type = 'l', xlab = "k")
+```
+
+# check metrics for tuned k parameter
+```{r}
+# analyze metrics for tuned KNN model for imputing 'type'
+classifications = knn(imputeTrain[,2:12], imputeTest[,2:12], imputeTrain$type, prob = TRUE, k = 5)
+cM = confusionMatrix(table(classifications, imputeTest$type))
+cM
+```
+
+# impute for NA in variable type
+```{r}
+# impute types for NA using KNN with tuned hyperparameter K
+set.seed(123)
+
+# observations to impute for
+combinedWineNA = combinedWine %>% filter(is.na(type))
+
+classifications = knn(combinedWineNoNA[,2:12], combinedWineNA[,2:12], combinedWineNoNA$type, prob = TRUE, k = 5)
+combinedWineNA$type = factor(as.character(classifications))
+
+# replace NAs with imputed type
+train$type[is.na(train$type)] <- combinedWineNA$type[match(
+  train$ID[is.na(train$type)],
+  combinedWineNA$ID
+)]
+
+test$type[is.na(test$type)] <- combinedWineNA$type[match(
+  test$ID[is.na(test$type)],
+  combinedWineNA$ID
+)]
+```
+
+# sanity check
+```{r}
+# sanity check to see if type still has NA values
+summary(train)
+summary(test)
+```
+# Objectives A and B
+Objective B before A as identifying key features may be beneficial in creating our models
+
+# Objective B
+Identify the key determinants of high-quality wine.
+Key factors may include:
+- Acidity levels
+- Sugar content
+- pH Level
+- Alcohol Content
+
+# Correlation Matrices for different data transformations
+```{r}
+corData = train %>% select(-c(ID, type, location))
+lin_logCorData = log(corData)
+lin_logCorData$quality = corData$quality
+log_linCorData = corData
+log_linCorData$logQuality = log(corData$quality)
+
+correlation_matrix = cor(corData, method = "pearson")
+cor_melt = melt(correlation_matrix)
+
+lin_log_correlation_matrix = cor(lin_logCorData, method = "pearson")
+lin_logcor_melt = melt(lin_log_correlation_matrix)
+
+log_lin_correlation_matrix = cor(log_linCorData, method = "pearson")
+log_lincor_melt = melt(log_lin_correlation_matrix)
+
+print(correlation_matrix)
+```
+# Visualizing the correlation matrices with Correlograms
+```{r}
+ggplot(data = cor_melt, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "green", mid = "white", midpoint = 0) +
+  geom_text(aes(label = round(value, 2)), size = 3) +
+  theme_solarized() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Correlogram of Physiochemical Wine Properties", x = "Variable 1", y = "Variable 2")
+
+ggplot(data = lin_logcor_melt, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "green", mid = "white", midpoint = 0) +
+  geom_text(aes(label = round(value, 2)), size = 3) +
+  theme_solarized() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Correlogram of Physiochemical Wine Properties (Lin-Log)", x = "Variable 1", y = "Variable 2")
+
+ggplot(data = log_lincor_melt, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "green", mid = "white", midpoint = 0) +
+  geom_text(aes(label = round(value, 2)), size = 3) +
+  theme_solarized() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Correlogram of Physiochemical Wine Properties (Log-Lin)", x = "Variable 1", y = "Variable 2")
+```
+From our correlogram, we can see that log transformations do not heavily change the correlation between quality and other variables. Therefore, we will focus on looking at just the linear-linear relationships between variables.
+
+By looking at our correlation matrix, it appears that quality and alcohol appear to be correlated the strongest when comparing quality to other variables for linear relationships. It is interesting to note that alcohol and density appear to be strongly correlated, which makes sense due to the chemical make-up of alcohol.
+
+## Plots of Continuous Variables vs Quality
+```{r}
+for (i in 2:12) {
+  plotData = train[, c(i,13,14)]
+  p = ggplot(data = plotData, aes(y = plotData[,1], x = as.factor(quality))) +
+    geom_boxplot() +
+    theme_solarized() +
+    theme(legend.position="none",
+          axis.text.x = element_text(face="bold", size = 15, angle = 0),
+          axis.text.y = element_text(face="bold", size = 15, angle = 0)) +
+    scale_fill_manual(values = c("pink")) +
+    labs(title = paste("Boxplot of", names(train)[i], "for each quality score"), y = names(train)[i], x = "Quality Score")
+  
+  print(p)
+}
+```
+Alcohol
+Density
+
+## Plots of Continuous Variables vs Quality by Wine Type
+```{r}
+for (i in 2:12) {
+  plotData = train[, c(i,13,14)]
+  p = ggplot(data = plotData, aes(y = plotData[,1], x = as.factor(quality), fill = type)) +
+    geom_boxplot() +
+    theme_solarized() +
+    theme(legend.position="none",
+          axis.text.x = element_text(face="bold", size = 15, angle = 0),
+          axis.text.y = element_text(face="bold", size = 15, angle = 0)) +
+    scale_fill_manual(values = c("red", "white")) +
+    labs(title = paste("Boxplot of", names(train)[i], "for each quality score by type"), y = names(train)[i], x = "Quality Score")
+  
+  print(p)
+}
+```
+Volatile Acidity by type
+Chlorides by type
+Sulphates by type
+Total Sulfur Dioxide by type
+Potentially Density by type
+Potentially Citric Acid by type
+Potentially Residual Sugar by type
+
+
+## Plots of Continuous Variables vs Quality by Location
+```{r}
+for (i in 2:12) {
+  plotData = train[, c(i,13,15)]
+  p = ggplot(data = plotData, aes(y = plotData[,1], x = as.factor(quality), fill = location)) +
+    geom_boxplot() +
+    theme_solarized() +
+    theme(legend.position="none",
+          axis.text.x = element_text(face="bold", size = 15, angle = 0),
+          axis.text.y = element_text(face="bold", size = 15, angle = 0)) +
+    scale_fill_manual(values = c("gold", "maroon")) + # gold for California, maroon for Texas
+    labs(title = paste("Boxplot of", names(train)[i], "for each quality score by location"), y = names(train)[i], x = "Quality Score")
+  
+  print(p)
+}
+```
+Potentially Volatile Acidity by location
+
+# Quantile-Quantile plots to look at the distributions of each continuous variable
+Can compare to histograms of continuous variables we had in initial EDA at the beginning
+```{r}
+for (i in 2:12) {
+  print(ggplot(train, aes(sample = train[,i])) +
+    stat_qq() +
+    stat_qq_line() +
+    theme_solarized() +
+    labs(title = paste("QQ Plot of", names(train)[i]), x = "Theoretical Quantiles", y = "Sample Quantiles"))
+}
+```
+As we saw before, most of our features are skewed/not normally distributed.
+
+```{r}
+ggplot(data = train, aes(x = as.factor(quality), fill = type)) +
+  geom_bar(position = "fill", stat = "count", color = "black") +
+  scale_fill_manual(values = c("red", "white")) +
+  theme_solarized() +
+  theme(legend.position="none", axis.text.y = element_text(face="bold", size = 8, angle = 0)) +
+  labs(title = "Comparison of wine quality frequency by wine types", x = "Quality Score", y = "frequency") +
+  geom_text(aes(label = scales::percent(..count../tapply(..count.., ..x.. ,sum)[..x..])), 
+            position = position_fill(vjust = 0.5), 
+            stat = "count")
+
+ggplot(data = train, aes(x = as.factor(quality), fill = location)) +
+  geom_bar(position = "fill", stat = "count", color = "black") +
+  scale_fill_manual(values = c("gold", "maroon")) +
+  theme_solarized() +
+  theme(legend.position="none", axis.text.y = element_text(face="bold", size = 8, angle = 0)) +
+  labs(title = "Comparison of wine quality frequency by location", x = "Quality Score", y = "frequency") +
+  geom_text(aes(label = scales::percent(..count../tapply(..count.., ..x.. ,sum)[..x..])), 
+            position = position_fill(vjust = 0.5), 
+            stat = "count")
+
+ggplot(data = train, aes(x = type, fill = location)) +
+  geom_bar(position = "fill", stat = "count", color = "black") +
+  scale_fill_manual(values = c("gold", "maroon")) +
+  theme_solarized() +
+  theme(legend.position="none", axis.text.y = element_text(face="bold", size = 8, angle = 0)) +
+  labs(title = "Comparison of wine type frequency by location", x = "Wine Type", y = "frequency") +
+  geom_text(aes(label = scales::percent(..count../tapply(..count.., ..x.. ,sum)[..x..])), 
+            position = position_fill(vjust = 0.5), 
+            stat = "count")
+```
+## Conclusion
+
+The features that can be considered *top* features related to the quality of the wine are:
+- Alcohol
+- Density
+and if differentiating by type of wine, then also:
+- Volatile Acidity by type
+- Chlorides by type
+- Sulphates by type
+- Total Sulfur Dioxide by type
+
+Alcohol and Density appear to have fairly clear correlation with quality. As alcohol content goes up, the quality score appears to also go up. Density instead has a rather negative relationship instead. This is more clear when looking at them differentiated by type as well; Red wines tend to not lose too much density as quality goes up, however White wines tend to be much less dense as quality increases.
+
+Volatile acidity seems to be constant for white wine on average as quality scores improve, however, red wines tend to have a higher volatile acidity at lower quality scores. Chlorides remain fairly constant throughout quality scores, however, they are at much different median levels when looking at different wine types. Much like volatile acidity, sulphates remain fairly constant for white wine on average as quality scores improve, however, red wines tend to have a higher sulphate value at higher quality scores. Lastly, total sulfur dioxide scores are fairly constant throughout quality scores, however, they are at different median levels when looking at different wine types.
+
+Therefore, in no particular order, I would recommend those features to be the top features related to the quality of wine.
+
+# Objective A
+Build Predictive Model that accurately forecasts wine quality based on various features.
+Aim to achieve lowest Mean Absolute Error (MAE), ensuring high precision in our predictions.
+
+## MAE
+```{r}
+calculate_mae <- function(actual_values, predicted_values) {
+  absolute_errors = abs(actual_values - predicted_values)
+  mae = mean(absolute_errors)
+  mae
+}
+
+calculate_r2 = function(actual_values, predicted_values){
+  cor(actual_values,predicted_values)^2
+}
+```
+
+## MLR
+
+### MLR with the values we put through as top features
+```{r}
+mlrTrain3 = train %>% select(-ID)
+train_control = trainControl(method = "cv", number = 5)
+
+mlrModel3 = train(quality ~ alcohol + density + type + volatile.acidity + chlorides + sulphates + total.sulfur.dioxide + volatile.acidity:type + chlorides:type  + sulphates:type + total.sulfur.dioxide:type,
+                 data = mlrTrain3,
+                 trControl = train_control,
+                 method = "lm")
+
+mlrModel3
+
+predictMLR3 = round(predict(mlrModel3, newdata = train))
+
+calculate_mae(train$quality, predictMLR3)
+calculate_r2(train$quality, predictMLR3)
+```
+### MLR with the values we put through as top features but with linear-log transformation
+```{r}
+mlrTrain2 = train %>% select(-ID)
+train_control = trainControl(method = "cv", number = 5)
+
+mlrModel2 = train(quality ~ log(alcohol) + log(density) + type + log(volatile.acidity) + log(chlorides) + log(sulphates) + log(total.sulfur.dioxide) + log(volatile.acidity):type + log(chlorides):type  + log(sulphates):type + log(total.sulfur.dioxide):type,
+                 data = mlrTrain2,
+                 trControl = train_control,
+                 method = "lm")
+
+mlrModel2
+
+predictMLR2 = round(predict(mlrModel2, newdata = train))
+
+calculate_mae(train$quality, predictMLR2)
+calculate_r2(train$quality, predictMLR2)
+```
+### MLR with stepwise feature selection with interaction terms with type and location
+Feature selection done with p-values
+```{r}
+mlrTrain = train %>% select(-ID)
+predictors = setdiff(names(mlrTrain), c("quality", "location", "type"))
+
+formulaMLR = as.formula(paste("quality ~ . + type * (", paste(predictors, collapse = " + "), ") + location * (", paste(predictors, collapse = " + "), ")"))
+
+full_model = lm(formulaMLR, data = mlrTrain)
+
+a = ols_step_both_p(full_model, details = TRUE, p_enter = 0.12, p_remove = 0.25)
+```
+
+Building model with feature selection
+```{r}
+train_control = trainControl(method = "cv", number = 5)
+
+mlrModel = train(quality ~ location + alcohol + volatile.acidity + sulphates + residual.sugar + chlorides + free.sulfur.dioxide + fixed.acidity + pH + density:type + total.sulfur.dioxide + fixed.acidity:location + pH:type + alcohol:location + pH:location + alcohol:type + free.sulfur.dioxide:type + residual.sugar:location,
+                 data = mlrTrain,
+                 trControl = train_control,
+                 method = "lm")
+
+mlrModel
+
+predictMLR = round(predict(mlrModel, newdata = train))
+
+calculate_mae(train$quality, predictMLR)
+calculate_r2(train$quality, predictMLR)
+```
+
+## Naive-Bayes
+### NB with all variables
+```{r}
+trainNB = train
+trainNB$quality = as.factor(trainNB$quality)
+expVariables = c('fixed.acidity', "volatile.acidity", "citric.acid", "residual.sugar", "chlorides", "free.sulfur.dioxide", "total.sulfur.dioxide", "density", "pH", "sulphates", "alcohol", "type", "location")
+trainIndices = sample(1:dim(trainNB)[1], round(0.7 * dim(trainNB)[1]))
+trainData = trainNB[trainIndices,]
+testData = trainNB[-trainIndices,]
+nbModel1 = naiveBayes(select(trainData, expVariables), trainData$quality)
+table(predict(nbModel1, select(testData, c(expVariables), "quality")), testData$quality)
+CM = confusionMatrix(table(predict(nbModel1, select(testData, c(expVariables), "quality")), testData$quality))
+CM
+
+trainNB$qualityPred = predict(nbModel1, select(trainNB, c(expVariables), "quality"))
+calculate_mae(as.numeric(trainNB$quality), as.numeric(trainNB$qualityPred))
+```
+
+### NB with variables chosen from Objective B
+- Alcohol
+- Density
+and if differentiating by type of wine, then also:
+- Volatile Acidity by type
+- Chlorides by type
+- Sulphates by type
+- Total Sulfur Dioxide by type
+```{r}
+trainNB2 = train
+trainNB2$quality = as.factor(trainNB2$quality)
+expVariables2 = c("volatile.acidity", "chlorides", "total.sulfur.dioxide", "density", "sulphates", "alcohol", "type")
+trainIndices = sample(1:dim(trainNB2)[1], round(0.7 * dim(trainNB2)[1]))
+trainData = trainNB2[trainIndices,]
+testData = trainNB2[-trainIndices,]
+nbModel2 = naiveBayes(select(trainData, expVariables2), trainData$quality)
+table(predict(nbModel2, select(testData, c(expVariables2), "quality")), testData$quality)
+CM = confusionMatrix(table(predict(nbModel2, select(testData, c(expVariables2), "quality")), testData$quality))
+CM
+
+trainNB2$qualityPred = predict(nbModel2, select(trainNB2, c(expVariables2), "quality"))
+calculate_mae(as.numeric(trainNB2$quality), as.numeric(trainNB2$qualityPred))
+```
+
+## KNN
+### KNN with all variables
+```{r}
+knnData = train
+knnData$quality = as.factor(knnData$quality)
+
+set.seed(123)
+
+train_indices = sample(1:nrow(knnData), 0.7 * nrow(knnData))
+trainKNN = knnData[train_indices,]
+testKNN = knnData[-train_indices,]
+
+iterations = 100
+numks = 20
+
+masterAcc = matrix(nrow = iterations, ncol = numks)
+
+for (j in 1:iterations) {
+  accs = data.frame(accuracy = numeric(numks), k = numeric(numks))
+  train_indices = sample(1:nrow(knnData), 0.7 * nrow(knnData))
+  trainKNN = knnData[train_indices,]
+  testKNN = knnData[-train_indices,]
+  for (i in 1:numks) {
+    classifications = knn(trainKNN[,c(2:12)], testKNN[,c(2:12)], trainKNN$quality, prob = TRUE, k = i)
+    table(classifications, testKNN$quality)
+    cM = confusionMatrix(table(classifications, testKNN$quality))
+    masterAcc[j,i] = cM$overall[1]
+  }
+}
+
+meanAcc = colMeans(masterAcc)
+
+plot(seq(1, numks,1), meanAcc, type = 'l', xlab = "k", main = "Mean accuracy vs tuning of k", sub = "100 iterations for k = 1 - 20")
+```
+
+```{r}
+set.seed(123)
+train_indices = sample(1:nrow(knnData), 0.7 * nrow(knnData))
+trainKNN = knnData[train_indices,]
+testKNN = knnData[-train_indices,]
+
+classificationsKNN = knn(trainKNN[,c(2:12)], testKNN[,c(2:12)], trainKNN$quality, prob = TRUE, k = 16)
+knnQualityPredicted = as.integer(classificationsKNN)
+
+calculate_mae(as.integer(testKNN$quality), knnQualityPredicted)
+```
+
+```{r}
+# impute types for NA using KNN with tuned hyperparameter K
+set.seed(123)
+
+knnResults = test
+
+classificationsKNN = knn(train[,2:12], test[,2:12], train$quality, prob = TRUE, k = 16)
+knnResults$quality = factor(as.integer(classificationsKNN))
+
+summary(knnResults)
+```
+### KNN with chosen variables from Objective B
+```{r}
+expVariablesKNN = c("volatile.acidity", "chlorides", "total.sulfur.dioxide", "density", "sulphates", "alcohol")
+knnData2 = train %>% select(c(expVariablesKNN, "quality"))
+knnData2$quality = as.factor(knnData2$quality)
+
+set.seed(123)
+
+train_indices = sample(1:nrow(knnData2), 0.7 * nrow(knnData2))
+trainKNN2 = knnData2[train_indices,]
+testKNN2 = knnData2[-train_indices,]
+
+iterations = 100
+numks = 20
+
+masterAcc = matrix(nrow = iterations, ncol = numks)
+
+for (j in 1:iterations) {
+  accs = data.frame(accuracy = numeric(numks), k = numeric(numks))
+  train_indices = sample(1:nrow(knnData2), 0.7 * nrow(knnData2))
+  trainKNN2 = knnData2[train_indices,]
+  testKNN2 = knnData2[-train_indices,]
+  for (i in 1:numks) {
+    classifications = knn(trainKNN2[,c(1:6)], testKNN2[,c(1:6)], trainKNN2$quality, prob = TRUE, k = i)
+    table(classifications, testKNN2$quality)
+    cM = confusionMatrix(table(classifications, testKNN2$quality))
+    masterAcc[j,i] = cM$overall[1]
+  }
+}
+
+meanAcc = colMeans(masterAcc)
+
+plot(seq(1, numks,1), meanAcc, type = 'l', xlab = "k", main = "Mean accuracy vs tuning of k", sub = "100 iterations for k = 1 - 20")
+```
+
+```{r}
+set.seed(123)
+train_indices = sample(1:nrow(knnData2), 0.7 * nrow(knnData2))
+trainKNN2 = knnData2[train_indices,]
+testKNN2 = knnData2[-train_indices,]
+
+classificationsKNN2 = knn(trainKNN2[,c(1:6)], testKNN2[,c(1:6)], trainKNN2$quality, prob = TRUE, k = 9)
+knnQualityPredicted2 = as.integer(classificationsKNN2)
+
+calculate_mae(as.integer(testKNN2$quality), knnQualityPredicted2)
+```
+
+```{r}
+# impute types for NA using KNN with tuned hyperparameter K
+set.seed(123)
+
+knnResults2 = test
+
+classificationsKNN2 = knn(train[,2:12], test[,2:12], train$quality, prob = TRUE, k = 9)
+knnResults2$quality = factor(as.integer(classificationsKNN2))
+
+summary(knnResults2)
+```
+## MAE Results
+```{r}
+print("MLR")
+calculate_mae(train$quality, predictMLR3) # top features
+calculate_mae(train$quality, predictMLR2) # linear-log top features
+calculate_mae(train$quality, predictMLR) # stepwise feature selection
+
+print("Naive-Bayes")
+calculate_mae(as.numeric(trainNB$quality), as.numeric(trainNB$qualityPred)) # NB All variables
+calculate_mae(as.numeric(trainNB2$quality), as.numeric(trainNB2$qualityPred)) # NB top features
+
+print("KNN")
+calculate_mae(as.integer(testKNN$quality), knnQualityPredicted) # KNN All variables k = 16
+calculate_mae(as.integer(testKNN2$quality), knnQualityPredicted2) # KNN top features k = 9
+```
+
+```{r}
+finalModel = train(quality ~ alcohol + density + type + volatile.acidity + chlorides + sulphates + total.sulfur.dioxide + volatile.acidity:type + chlorides:type  + sulphates:type + total.sulfur.dioxide:type,
+                 data = train,
+                 trControl = train_control,
+                 method = "lm")
+
+mlrModel3
+
+predictTestQuality = round(predict(finalModel, newdata = test))
+
+final_predictions = test
+final_predictions$quality = predictTestQuality
+final_predictions = final_predictions %>% select(c(ID, quality))
+```
+```{r}
+write.csv(final_predictions, "./Project2_Azhand_Graham_Wine_Predictions.csv", row.names = F)
+```
+
+
+## Conclusion
+We chose Multiple Linear Regression (with stepwise feature selection) as our predictive model as it seemed to work best for minimizing the Mean Absolute Error (MAE). It is important to note that we recalculated the MAE as we would take the predicted quality scores and round to make sure they were integers, as the quality score is an integer, thus a model summary's MAE may not be correct in the event we used a model such as linear regression that does not classify but rather predict.
+
+Our chosen predictive model predicted for the quality score of wine using the variables: location, alcohol, volatile acidity, sulphates, residual sugar, chlorides, free sulfur dioxide, fixed acidity, pH, total sulfur dioxide with interactions of type on density, pH, alcohol, free sulfur dioxide and interactions of location on fixed acidity, alcohol, pH, and residual sugar.
+The formula without coefficient is: quality = location + alcohol + volatile.acidity + sulphates + residual.sugar + chlorides + free.sulfur.dioxide + fixed.acidity + pH + density:type + total.sulfur.dioxide + fixed.acidity:location + pH:type + alcohol:location + pH:location + alcohol:type + free.sulfur.dioxide:type + residual.sugar:location
+
+In the future, we may want to return to this problem with a wider arsenal of predictive models or feature selection to make an even stronger model.
